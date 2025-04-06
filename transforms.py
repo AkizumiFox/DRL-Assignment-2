@@ -1,5 +1,3 @@
-# Board transformation functions for symmetry
-
 def rot90(pattern):
     """Rotate pattern 90 degrees clockwise."""
     return [(y, 3 - x) for (x, y) in pattern]
