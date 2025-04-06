@@ -9,6 +9,7 @@ import copy
 import random
 import math
 
+from approximator import NTupleApproximator
 
 class Game2048Env(gym.Env):
     def __init__(self):
@@ -132,7 +133,7 @@ class Game2048Env(gym.Env):
 
         return True
 
-    def step(self, action):
+    def step(self, action, spawn_tile=True):
         """Execute one action"""
         assert self.action_space.contains(action), "Invalid action"
 
@@ -149,41 +150,12 @@ class Game2048Env(gym.Env):
 
         self.last_move_valid = moved  # Record if the move was valid
 
-        if moved:
+        if moved and spawn_tile:
             self.add_random_tile()
 
         done = self.is_game_over()
 
         return self.board, self.score, done, {}
-
-    def render(self, mode="human", action=None):
-        """
-        Render the current board using Matplotlib.
-        This function does not check if the action is valid and only displays the current board state.
-        """
-        fig, ax = plt.subplots(figsize=(4, 4))
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_xlim(-0.5, self.size - 0.5)
-        ax.set_ylim(-0.5, self.size - 0.5)
-
-        for i in range(self.size):
-            for j in range(self.size):
-                value = self.board[i, j]
-                color = COLOR_MAP.get(value, "#3c3a32")  # Default dark color
-                text_color = TEXT_COLOR.get(value, "white")
-                rect = plt.Rectangle((j - 0.5, i - 0.5), 1, 1, facecolor=color, edgecolor="black")
-                ax.add_patch(rect)
-
-                if value != 0:
-                    ax.text(j, i, str(value), ha='center', va='center',
-                            fontsize=16, fontweight='bold', color=text_color)
-        title = f"score: {self.score}"
-        if action is not None:
-            title += f" | action: {self.actions[action]}"
-        plt.title(title)
-        plt.gca().invert_yaxis()
-        plt.show()
 
     def simulate_row_move(self, row):
         """Simulate a left move for a single row"""
@@ -231,10 +203,61 @@ class Game2048Env(gym.Env):
         # If the simulated board is different from the current board, the move is legal
         return not np.array_equal(self.board, temp_board)
 
+
 def get_action(state, score):
-    env = Game2048Env()
-    return random.choice([0, 1, 2, 3]) # Choose a random action
+    """
+    Uses a pre-trained N-Tuple approximator to select the best action.
     
-    # You can submit this random agent to evaluate the performance of a purely random strategy.
+    Args:
+        state: The current board state (4x4 numpy array)
+        score: The current game score
+        
+    Returns:
+        int: The selected action (0: up, 1: down, 2: left, 3: right)
+    """
+
+    # Use function attributes to store the approximator
+    if not hasattr(get_action, 'approximator'):
+        patterns = [
+            [(0,0), (0,1), (1,0), (1,1), (2,0), (2,1)],
+            [(0,0), (0,1), (1,1), (1,2), (1,3), (2,2)],
+            [(0,0), (1,0), (2,0), (2,1), (3,0), (3,1)],
+            [(0,1), (1,1), (2,1), (2,2), (3,1), (3,2)],
+            [(0,0), (0,1), (0,2), (1,1), (2,1), (2,2)],
+            [(0,0), (0,1), (1,1), (2,1), (3,1), (3,2)],
+            [(0,0), (0,1), (1,1), (2,0), (2,1), (3,1)],
+            [(0,0), (1,0), (0,1), (0,2), (1,2), (2,2)]
+        ]
+        get_action.approximator = NTupleApproximator(board_size=4, patterns=patterns)
+        get_action.approximator.load("ntuple_weights_20000.pkl")
+    
+    approximator = get_action.approximator
+
+    env = Game2048Env()
+    env.board = state
+    env.score = score
+    
+    # Try each possible action and choose the best one
+    legal_moves = [a for a in range(4) if env.is_move_legal(a)]
+    if not legal_moves:
+        return random.choice([0, 1, 2, 3])
+    
+    # Choose the best action
+    best_value = -float('inf')
+    best_action = None
+    for action in legal_moves:
+        sim_env = copy.deepcopy(env)
+        sim_env.step(action, spawn_tile=False)
+        sim_after = sim_env.board.copy()
+        value = approximator.value(sim_after)
+        if value > best_value:
+            best_value = value
+            best_action = action
+
+    if best_action is None:
+        print("No legal action found")
+        best_action = random.choice([0, 1, 2, 3])
+    
+    return best_action
 
 
