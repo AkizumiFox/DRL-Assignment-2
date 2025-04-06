@@ -30,7 +30,13 @@ jobs:
         pip install gdown
     
     - name: 3. Downloading weights
-      run: gdown https://drive.google.com/file/d/16fdoynp6klR2CkcRMzSHd924Dt5vbEN2/view?usp=sharing
+      run: gdown 16fdoynp6klR2CkcRMzSHd924Dt5vbEN2 -O ntuple_weights_20000.pkl
+
+    - name: 3.5. list the working directory
+      run: |
+        echo "=============================="
+        ls -la
+        echo "=============================="
 
     - name: 4. Ensure env.so is executable
       run: chmod +x env.cpython-38-x86_64-linux-gnu.so
