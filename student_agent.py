@@ -10,6 +10,7 @@ import random
 import math
 
 from approximator import NTupleApproximator
+from mcts import MCTS
 
 class Game2048Env(gym.Env):
     def __init__(self):
@@ -229,7 +230,7 @@ def get_action(state, score):
             [(0,0), (1,0), (0,1), (0,2), (1,2), (2,2)]
         ]
         get_action.approximator = NTupleApproximator(board_size=4, patterns=patterns)
-        get_action.approximator.load("ntuple_weights_20000.pkl")
+        get_action.approximator.load("ntuple_weights.pkl")
     
     approximator = get_action.approximator
 
@@ -239,24 +240,11 @@ def get_action(state, score):
     
     # Try each possible action and choose the best one
     legal_moves = [a for a in range(4) if env.is_move_legal(a)]
-    if not legal_moves:
-        return random.choice([0, 1, 2, 3])
+    if not legal_moves: return random.choice([0, 1, 2, 3])
     
-    # Choose the best action
-    best_value = -float('inf')
-    best_action = None
-    for action in legal_moves:
-        sim_env = copy.deepcopy(env)
-        sim_env.step(action, spawn_tile=False)
-        sim_after = sim_env.board.copy()
-        value = approximator.value(sim_after)
-        if value > best_value:
-            best_value = value
-            best_action = action
-
-    if best_action is None:
-        print("No legal action found")
-        best_action = random.choice([0, 1, 2, 3])
+    mcts_solver = MCTS(env, approximator, iterations=100, rollout_depth=5)
+    best_action = mcts_solver.search()
+    print(best_action)
     
     return best_action
 
