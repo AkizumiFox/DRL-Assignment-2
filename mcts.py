@@ -9,7 +9,7 @@ class DecisionNode:
     A decision (action) node. This represents the state that the agent sees (after a random tile has been added).
     """
     def __init__(self, env, parent=None, action_from_parent=None):
-        # Make a deep copy so that each node’s environment is independent.
+        # Make a deep copy so that each node's environment is independent.
         self.env = copy.deepcopy(env)
         self.parent = parent
         self.action_from_parent = action_from_parent
@@ -42,10 +42,11 @@ class ChanceNode:
     A chance node that represents the intermediate state after the player's move (before the random tile is added).
     Its children are decision nodes corresponding to each possible outcome of the tile addition.
     """
-    def __init__(self, env, parent, action):
+    def __init__(self, env, parent, action, reward=0):
         self.env = copy.deepcopy(env)  # This state results from taking an action (without spawning a tile)
         self.parent = parent
         self.action = action
+        self.reward = reward  # Store the reward obtained from the parent to this node
         # Children: mapping from outcome to decision node.
         # Each outcome is a tuple: (x, y, tile, probability)
         self.children = {}
@@ -86,28 +87,33 @@ class ChanceNode:
 
 class MCTS:
     """
-    Two-phase MCTS for the 2048 game.
+    Modified MCTS for the 2048 game using afterstate value function.
     Alternates between decision nodes (agent moves) and chance nodes (random tile additions).
     """
-    def __init__(self, env, approximator, iterations=1000, exploration=math.sqrt(2), rollout_depth=100):
+    def __init__(self, env, approximator, iterations=1000, exploration=math.sqrt(2), value_norm=20000):
         self.root = DecisionNode(env)
         self.approximator = approximator
         self.iterations = iterations
         self.exploration = exploration
-        self.rollout_depth = rollout_depth
+        self.value_norm = value_norm  # Normalization constant for the value function
 
     def search(self):
         """
         Run MCTS for a given number of iterations and return the best action from the root.
         """
+        # First, fully expand the root node to compute all possible afterstates
+        if not self.root.children:
+            self._expand_decision_node(self.root)
+            
         for _ in range(self.iterations):
-            # selection and expansion: traverse the tree to a leaf
-            leaf, path = self._tree_policy(self.root)
-            # simulation: run a rollout (default: random play)
-            reward = self._rollout(leaf)
-            # backpropagation: update the nodes along the path with the rollout reward
-            self._backpropagate(path, reward)
-        # Select the action leading to the child chance node with the highest visit count.
+            # Selection: traverse the tree to a leaf node
+            leaf, path, cumulative_reward = self._tree_policy(self.root)
+            # Evaluation: use the approximator instead of rollout
+            value = self._evaluate_node(leaf, cumulative_reward)
+            # Backpropagation: update the nodes along the path with the evaluation
+            self._backpropagate(path, value)
+            
+        # Select the action leading to the child chance node with the highest visit count
         best_action = None
         best_visits = -1
         for action, chance_node in self.root.children.items():
@@ -116,111 +122,107 @@ class MCTS:
                 best_action = action
         return best_action
 
+    def _expand_decision_node(self, node):
+        """
+        Expand a decision node by creating all possible chance node children.
+        """
+        for action in node.untried_actions:
+            new_env = copy.deepcopy(node.env)
+            # Perform the move WITHOUT spawning a random tile
+            reward = new_env.step(action, spawn_tile=False)[1]  # Get the reward from the action
+            # Create a chance node corresponding to the deterministic outcome
+            chance_child = ChanceNode(new_env, node, action, reward)
+            node.children[action] = chance_child
+            # Calculate the value of this afterstate using the approximator
+            chance_child.value = self.approximator.value(chance_child.env.board)
+        # Remove all untried actions since we've expanded all of them
+        node.untried_actions = []
+
+    def _expand_chance_node(self, node):
+        """
+        Expand a chance node by creating all possible decision node children.
+        """
+        for outcome in node.untried_outcomes:
+            new_env = copy.deepcopy(node.env)
+            x, y, tile, _ = outcome
+            new_env.board[x, y] = tile  # simulate the tile addition
+            decision_child = DecisionNode(new_env, parent=node, action_from_parent=outcome)
+            node.children[outcome] = decision_child
+        # Remove all untried outcomes since we've expanded all of them
+        node.untried_outcomes = []
+
     def _tree_policy(self, node):
         """
-        Traverse the tree (starting at a decision node) and expand nodes along the way.
-        Returns the leaf node and the path (list of nodes) from the root to the leaf.
+        Traverse the tree (starting at a decision node) and return the leaf node,
+        the path from the root to the leaf, and the cumulative reward along that path.
         """
         path = [node]
         current = node
+        cumulative_reward = 0
+        
         while not current.is_terminal:
             # If we are at a decision node:
             if isinstance(current, DecisionNode):
-                # Expand an untried action if available.
+                # If there are untried actions, expand all of them at once
                 if current.untried_actions:
-                    action = random.choice(current.untried_actions)
-                    current.untried_actions.remove(action)
-                    new_env = copy.deepcopy(current.env)
-                    # Perform the move WITHOUT spawning a random tile
-                    new_env.step(action, spawn_tile=False)
-                    # Create a chance node corresponding to the deterministic outcome.
-                    chance_child = ChanceNode(new_env, current, action)
-                    current.children[action] = chance_child
-                    path.append(chance_child)
-                    current = chance_child
-                    # Now expand the chance node: if it has an untried outcome, expand it.
-                    if current.untried_outcomes:
-                        outcome = random.choice(current.untried_outcomes)
-                        current.untried_outcomes.remove(outcome)
-                        new_env2 = copy.deepcopy(current.env)
-                        x, y, tile, _ = outcome
-                        new_env2.board[x, y] = tile  # simulate the tile addition
-                        decision_child = DecisionNode(new_env2, parent=current, action_from_parent=outcome)
-                        current.children[outcome] = decision_child
-                        path.append(decision_child)
-                        current = decision_child
-                    else:
-                        # In the unlikely event that the chance node has no untried outcomes,
-                        # sample one from its children.
-                        current = current.sample_outcome()
-                        path.append(current)
-                else:
-                    # If all actions have been tried at this decision node, select one via UCT.
-                    chance_child = current.uct_select_child(self.exploration)
-                    path.append(chance_child)
-                    current = chance_child
+                    self._expand_decision_node(current)
+                
+                # Select a chance node using UCT
+                chance_child = current.uct_select_child(self.exploration)
+                cumulative_reward += chance_child.reward  # Add reward from this action
+                path.append(chance_child)
+                current = chance_child
+                
             # If we are at a chance node:
             elif isinstance(current, ChanceNode):
+                # If there are untried outcomes, expand all of them at once
                 if current.untried_outcomes:
-                    outcome = random.choice(current.untried_outcomes)
-                    current.untried_outcomes.remove(outcome)
-                    new_env2 = copy.deepcopy(current.env)
-                    x, y, tile, _ = outcome
-                    new_env2.board[x, y] = tile
-                    decision_child = DecisionNode(new_env2, parent=current, action_from_parent=outcome)
-                    current.children[outcome] = decision_child
-                    path.append(decision_child)
-                    current = decision_child
-                else:
-                    # Fully expanded chance node: sample a decision node child according to the outcome probabilities.
-                    decision_child = current.sample_outcome()
-                    path.append(decision_child)
-                    current = decision_child
-            # Stop if we reach a terminal decision node.
-            if isinstance(current, DecisionNode) and current.is_terminal:
+                    self._expand_chance_node(current)
+                    
+                # Sample a decision node child according to the outcome probabilities
+                decision_child = current.sample_outcome()
+                path.append(decision_child)
+                current = decision_child
+                
+            # Stop if we reach a leaf node (terminal or newly expanded)
+            if (isinstance(current, DecisionNode) and 
+                (current.is_terminal or not current.children)) or \
+               (isinstance(current, ChanceNode) and not current.children):
                 break
-        return current, path
+                
+        return current, path, cumulative_reward
 
-    def _rollout(self, node, depth=0):
+    def _evaluate_node(self, node, cumulative_reward):
         """
-        Perform a rollout (simulation) from the given decision node until game over or a rollout depth is reached.
-        Uses the environment's built-in randomness (which includes random tile additions).
-        Returns the final score as the reward.
+        Evaluate a node using the value function instead of a rollout.
         """
-        total_reward = 0.0
-        discount = 1.0
-        
-        sim_env = copy.deepcopy(node.env)
-        for d in range(depth):
-            if sim_env.is_game_over(): break
+        if isinstance(node, DecisionNode):
+            # For a decision node, we need to expand its afterstates first if not already done
+            if not node.children and not node.is_terminal:
+                self._expand_decision_node(node)
+                
+            # If terminal or no legal moves, the value is 0
+            if node.is_terminal or not node.children:
+                node_value = 0
+            else:
+                # Value is the maximum of (reward + afterstate value) across all actions
+                max_value = float('-inf')
+                for action, chance_node in node.children.items():
+                    action_value = chance_node.reward + chance_node.value
+                    max_value = max(max_value, action_value)
+                node_value = max_value
+                
+        elif isinstance(node, ChanceNode):
+            # For a chance node, we can use its already computed value
+            node_value = node.value
+            
+        # Return the normalized value: (cumulative_reward + node_value) / value_norm
+        return (cumulative_reward + node_value) / self.value_norm
 
-            legal_moves = [a for a in range(4) if sim_env.is_move_legal(a)]
-            if not legal_moves: break
-
-            action = random.choice(legal_moves)
-            _, reward, done, _ = sim_env.step(action)
-            total_reward += discount * reward
-            discount *= self.gamma
-            if done: break
-
-        if not sim_env.is_game_over(): total_reward += discount * self.approximator.value(sim_env.board)
-
-        return total_reward
-        # current_env = copy.deepcopy(node.env)
-        # depth = 0
-        # while not current_env.is_game_over() and depth < self.rollout_depth:
-        #     legal_actions = [a for a in range(4) if current_env.is_move_legal(a)]
-        #     if not legal_actions:
-        #         break
-        #     action = random.choice(legal_actions)
-        #     current_env.step(action)  # uses default spawn_tile=True
-        #     depth += 1
-        # return current_env.score
-
-    def _backpropagate(self, path, reward):
+    def _backpropagate(self, path, value):
         """
-        Update the visit count and value of all nodes along the path.
+        Update the statistics of all nodes along the path with the evaluation value.
         """
         for node in reversed(path):
             node.visits += 1
-            node.value += reward
+            node.value += value  # Update node's total value

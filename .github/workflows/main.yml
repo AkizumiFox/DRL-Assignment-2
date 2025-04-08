@@ -30,7 +30,7 @@ jobs:
         pip install gdown
     
     - name: 3. Downloading weights
-      run: gdown 1GphfGL4t7wdRnP8UY_q5Bpl2ceTUNzAJ -O ntuple_weights.pkl
+      run: gdown 1Y9lLgx1ZPp4QTVyG9NmD_DqnFbUgRLJq -O ntuple_weights.pkl
 
     - name: 3.5. list the working directory
       run: |

@@ -242,7 +242,7 @@ def get_action(state, score):
     legal_moves = [a for a in range(4) if env.is_move_legal(a)]
     if not legal_moves: return random.choice([0, 1, 2, 3])
     
-    mcts_solver = MCTS(env, approximator, iterations=100, rollout_depth=5)
+    mcts_solver = MCTS(env, approximator, iterations=100, value_norm=20000)
     best_action = mcts_solver.search()
     print(best_action)
     
