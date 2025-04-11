@@ -90,7 +90,7 @@ class MCTS:
     Modified MCTS for the 2048 game using afterstate value function.
     Alternates between decision nodes (agent moves) and chance nodes (random tile additions).
     """
-    def __init__(self, env, approximator, iterations=15000, exploration=0, value_norm=20000):
+    def __init__(self, env, approximator, iterations=15000, exploration=0, value_norm=5000):
         self.root = DecisionNode(env)
         self.approximator = approximator
         self.iterations = iterations
