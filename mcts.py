@@ -22,7 +22,7 @@ class DecisionNode:
         # Terminal flag (if game is over)
         self.is_terminal = self.env.is_game_over()
 
-    def uct_select_child(self, exploration=math.sqrt(2)):
+    def uct_select_child(self, approximator, exploration=math.sqrt(2)):
         """Select a child chance node using the UCT formula."""
         best_value = -float('inf')
         best_child = None
@@ -90,7 +90,7 @@ class MCTS:
     Modified MCTS for the 2048 game using afterstate value function.
     Alternates between decision nodes (agent moves) and chance nodes (random tile additions).
     """
-    def __init__(self, env, approximator, iterations=1000, exploration=0, value_norm=20000):
+    def __init__(self, env, approximator, iterations=10000, exploration=math.sqrt(1.5), value_norm=5000):
         self.root = DecisionNode(env)
         self.approximator = approximator
         self.iterations = iterations
@@ -122,6 +122,47 @@ class MCTS:
                 best_action = action
         return best_action
 
+    def _tree_policy(self, node):
+        """
+        Traverse the tree (starting at a decision node) and return the leaf node,
+        the path from the root to the leaf, and the cumulative reward along that path.
+        """
+        path = [node]
+        current = node
+        cumulative_reward = 0
+        
+        while not current.is_terminal:
+            # If we are at a decision node:
+            if isinstance(current, DecisionNode):
+                # If there are untried actions, expand all of them at once
+                if current.untried_actions:
+                    self._expand_decision_node(current)
+                
+                # Select a chance node using UCT
+                chance_child = current.uct_select_child(self.approximator, self.exploration)
+                cumulative_reward += chance_child.reward  # Add reward from this action
+                path.append(chance_child)
+                current = chance_child
+                
+            # If we are at a chance node:
+            elif isinstance(current, ChanceNode):
+                # If there are untried outcomes, expand all of them at once
+                if current.untried_outcomes:
+                    self._expand_chance_node(current)
+                    
+                # Sample a decision node child according to the outcome probabilities
+                decision_child = current.sample_outcome()
+                path.append(decision_child)
+                current = decision_child
+                
+            # Stop if we reach a leaf node (terminal or newly expanded)
+            if (isinstance(current, DecisionNode) and 
+                (current.is_terminal or not current.children)) or \
+               (isinstance(current, ChanceNode) and not current.children):
+                break
+                
+        return current, path, cumulative_reward
+
     def _expand_decision_node(self, node):
         """
         Expand a decision node by creating all possible chance node children.
@@ -150,47 +191,6 @@ class MCTS:
             node.children[outcome] = decision_child
         # Remove all untried outcomes since we've expanded all of them
         node.untried_outcomes = []
-
-    def _tree_policy(self, node):
-        """
-        Traverse the tree (starting at a decision node) and return the leaf node,
-        the path from the root to the leaf, and the cumulative reward along that path.
-        """
-        path = [node]
-        current = node
-        cumulative_reward = 0
-        
-        while not current.is_terminal:
-            # If we are at a decision node:
-            if isinstance(current, DecisionNode):
-                # If there are untried actions, expand all of them at once
-                if current.untried_actions:
-                    self._expand_decision_node(current)
-                
-                # Select a chance node using UCT
-                chance_child = current.uct_select_child(self.exploration)
-                cumulative_reward += chance_child.reward  # Add reward from this action
-                path.append(chance_child)
-                current = chance_child
-                
-            # If we are at a chance node:
-            elif isinstance(current, ChanceNode):
-                # If there are untried outcomes, expand all of them at once
-                if current.untried_outcomes:
-                    self._expand_chance_node(current)
-                    
-                # Sample a decision node child according to the outcome probabilities
-                decision_child = current.sample_outcome()
-                path.append(decision_child)
-                current = decision_child
-                
-            # Stop if we reach a leaf node (terminal or newly expanded)
-            if (isinstance(current, DecisionNode) and 
-                (current.is_terminal or not current.children)) or \
-               (isinstance(current, ChanceNode) and not current.children):
-                break
-                
-        return current, path, cumulative_reward
 
     def _evaluate_node(self, node, cumulative_reward):
         """
