@@ -90,7 +90,7 @@ class MCTS:
     Modified MCTS for the 2048 game using afterstate value function.
     Alternates between decision nodes (agent moves) and chance nodes (random tile additions).
     """
-    def __init__(self, env, approximator, iterations=100, exploration=0, value_norm=20000):
+    def __init__(self, env, approximator, iterations=15000, exploration=0, value_norm=20000):
         self.root = DecisionNode(env)
         self.approximator = approximator
         self.iterations = iterations
@@ -195,14 +195,6 @@ class MCTS:
     def _evaluate_node(self, node, cumulative_reward):
         """
         Evaluate a node using the value function instead of a rollout.
-        Returns the normalized total value: (cumulative_reward + node_value) / value_norm
-        
-        Args:
-            node: The leaf node to evaluate
-            cumulative_reward: Total reward accumulated along the path so far
-            
-        Returns:
-            float: Normalized value for backpropagation
         """
         if isinstance(node, DecisionNode):
             # For a decision node, we need to expand its afterstates first if not already done
@@ -216,46 +208,26 @@ class MCTS:
                 # Value is the maximum of (reward + afterstate value) across all actions
                 max_value = float('-inf')
                 for action, chance_node in node.children.items():
-                    action_value = chance_node.reward + chance_node.value / max(chance_node.visits, 1)
+                    action_value = chance_node.reward + chance_node.value
                     max_value = max(max_value, action_value)
                 node_value = max_value
                 
         elif isinstance(node, ChanceNode):
-            # For a chance node, use the weighted average of its children's values
-            if not node.children and not node.is_terminal:
-                self._expand_chance_node(node)
-                
-            if node.is_terminal or not node.children:
-                # Use the already computed value for this afterstate
-                node_value = node.value / max(node.visits, 1)
-            else:
-                # Calculate weighted average based on outcome probabilities
-                total_value = 0.0
-                total_weight = 0.0
-                for outcome, decision_child in node.children.items():
-                    weight = outcome[3]  # Probability weight
-                    child_value = decision_child.value / max(decision_child.visits, 1)
-                    total_value += weight * child_value
-                    total_weight += weight
-                node_value = total_value / total_weight if total_weight > 0 else 0
-        
+            # For a chance node, we can use its already computed value
+            node_value = node.value
+            
         # Return the normalized value: (cumulative_reward + node_value) / value_norm
         return (cumulative_reward + node_value) / self.value_norm
 
-    def _backpropagate(self, path, value):
+    def _backpropagate(self, path, leaf_value):
         """
-        Update the statistics of all nodes along the path with the evaluation value.
-        Returns the combined reward + value for potential further use.
-        
-        Args:
-            path: List of nodes from root to leaf
-            value: Normalized value to backpropagate
-            
-        Returns:
-            float: Total reward + value (un-normalized)
+        Update the statistics of all nodes along the path with their specific rewards and values.
         """
         for node in reversed(path):
             node.visits += 1
-            node.value += value
-        
-        return value * self.value_norm  
+            if isinstance(node, ChanceNode):
+                # For a ChanceNode, the value is the reward from the parent DecisionNode plus the leaf value
+                node.value += (node.reward + leaf_value) / self.value_norm
+            elif isinstance(node, DecisionNode):
+                # For a DecisionNode, the value is just the leaf value (since the reward is handled by the ChanceNode)
+                node.value += leaf_value / self.value_norm
