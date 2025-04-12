@@ -90,7 +90,7 @@ class MCTS:
     Modified MCTS for the 2048 game using afterstate value function.
     Alternates between decision nodes (agent moves) and chance nodes (random tile additions).
     """
-    def __init__(self, env, approximator, iterations=15000, exploration=0, value_norm=5000):
+    def __init__(self, env, approximator, iterations=30, exploration=0, value_norm=20000):
         self.root = DecisionNode(env)
         self.approximator = approximator
         self.iterations = iterations
@@ -105,7 +105,8 @@ class MCTS:
         if not self.root.children:
             self._expand_decision_node(self.root)
             
-        for _ in range(self.iterations):
+        for idx in range(self.iterations):
+            print(f"idx = {idx}")
             # Selection: traverse the tree to a leaf node
             leaf, path, cumulative_reward = self._tree_policy(self.root)
             # Evaluation: use the approximator instead of rollout
@@ -131,36 +132,60 @@ class MCTS:
         current = node
         cumulative_reward = 0
         
+        idx = 0
         while not current.is_terminal:
+            idx += 1
+            # print(f"Depth: {idx}, Node type: {'Decision' if isinstance(current, DecisionNode) else 'Chance'}")
+            
             # If we are at a decision node:
             if isinstance(current, DecisionNode):
-                # If there are untried actions, expand all of them at once
+                # If there are untried actions, expand them
                 if current.untried_actions:
                     self._expand_decision_node(current)
+                    # After expansion, we should select and continue
                 
+                # If node has no children after expansion, mark as terminal and stop
+                if not current.children:
+                    current.is_terminal = True
+                    # print("Decision node has no children - marking as terminal")
+                    break
+                    
                 # Select a chance node using UCT
                 chance_child = current.uct_select_child(self.approximator, self.exploration)
+                if chance_child is None:
+                    # UCT selection failed - should not happen if node has children
+                    # print("UCT selection failed")
+                    break
+                    
                 cumulative_reward += chance_child.reward  # Add reward from this action
                 path.append(chance_child)
                 current = chance_child
                 
             # If we are at a chance node:
             elif isinstance(current, ChanceNode):
-                # If there are untried outcomes, expand all of them at once
+                # If there are untried outcomes, expand them
                 if current.untried_outcomes:
                     self._expand_chance_node(current)
+                    # After expansion, we should sample and continue
+                
+                # If node has no children after expansion, mark as terminal and stop
+                if not current.children:
+                    current.is_terminal = True
+                    # print("Chance node has no children - marking as terminal")
+                    break
                     
                 # Sample a decision node child according to the outcome probabilities
                 decision_child = current.sample_outcome()
+                if decision_child is None:
+                    # Sampling failed - should not happen if node has children
+                    # print("Sampling failed")
+                    break
+                    
                 path.append(decision_child)
                 current = decision_child
-                
-            # Stop if we reach a leaf node (terminal or newly expanded)
-            if (isinstance(current, DecisionNode) and 
-                (current.is_terminal or not current.children)) or \
-               (isinstance(current, ChanceNode) and not current.children):
-                break
-                
+            
+        # print(f"Final depth: {idx}, Is terminal: {current.is_terminal}")
+        
         return current, path, cumulative_reward
 
     def _expand_decision_node(self, node):
