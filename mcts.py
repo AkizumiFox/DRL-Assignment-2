@@ -17,23 +17,41 @@ class DecisionNode:
         self.children = {}
         self.visits = 0
         self.value = 0.0
-        # Untried actions (only legal moves)
+        # Cache legal moves to avoid recalculating
         self.untried_actions = [action for action in range(4) if self.env.is_move_legal(action)]
         # Terminal flag (if game is over)
-        self.is_terminal = self.env.is_game_over()
+        self.is_terminal = self.env.is_game_over() or not self.untried_actions
 
-    def uct_select_child(self, approximator, exploration=math.sqrt(2)):
+    def uct_select_child(self, approximator, exploration=0):
         """Select a child chance node using the UCT formula."""
         best_value = -float('inf')
         best_child = None
+        
+        # Fast path for no exploration (pure exploitation)
+        if exploration <= 0:
+            for action, child in self.children.items():
+                if child.visits == 0:
+                    return child  # First visit any unvisited child
+                if child.value > best_value:
+                    best_value = child.value
+                    best_child = child
+            return best_child
+            
+        # Standard UCT with exploration
+        log_visits = math.log(self.visits) if self.visits > 1 else 0
         for action, child in self.children.items():
             if child.visits == 0:
-                uct = approximator.value(child.env.board)
-            else:
-                uct = child.value / child.visits + exploration * math.sqrt(math.log(self.visits) / child.visits)
+                return child  # First visit any unvisited child
+                
+            # UCT formula
+            exploitation = child.value / child.visits
+            exploration_term = exploration * math.sqrt(log_visits / child.visits)
+            uct = exploitation + exploration_term
+            
             if uct > best_value:
                 best_value = uct
                 best_child = child
+                
         return best_child
 
 
@@ -52,20 +70,29 @@ class ChanceNode:
         self.children = {}
         self.visits = 0
         self.value = 0.0
+        # Cache the outcomes
         self.untried_outcomes = self._get_possible_outcomes()
         # Check terminality: if the board is full, no tile can be added.
-        self.is_terminal = self.env.is_game_over() or (len(self.untried_outcomes) == 0)
+        self.is_terminal = env.is_game_over() or not self.untried_outcomes
 
     def _get_possible_outcomes(self):
+        """Generate possible outcomes efficiently."""
         outcomes = []
         board = self.env.board
         empty_cells = list(zip(*np.where(board == 0)))
-        if empty_cells:
-            prob2 = 0.9 / len(empty_cells)
-            prob4 = 0.1 / len(empty_cells)
-            for cell in empty_cells:
-                outcomes.append((cell[0], cell[1], 2, prob2))
-                outcomes.append((cell[0], cell[1], 4, prob4))
+        
+        if not empty_cells:
+            return []
+            
+        num_empty = len(empty_cells)
+        # Precompute probabilities once
+        prob2 = 0.9 / num_empty
+        prob4 = 0.1 / num_empty
+        
+        for cell in empty_cells:
+            outcomes.append((cell[0], cell[1], 2, prob2))
+            outcomes.append((cell[0], cell[1], 4, prob4))
+            
         return outcomes
 
     def sample_outcome(self):
@@ -73,16 +100,24 @@ class ChanceNode:
         When the chance node is fully expanded, sample one of its decision-node children
         according to the tile addition probabilities.
         """
-        outcomes = []
-        weights = []
-        for outcome, child in self.children.items():
-            outcomes.append(child)
-            weights.append(outcome[3])  # outcome[3] holds the probability weight
-        # In case all outcomes have zero weight (should not happen), choose uniformly.
-        if sum(weights) == 0:
-            return random.choice(outcomes)
-        chosen = random.choices(outcomes, weights=weights, k=1)[0]
-        return chosen
+        if not self.children:
+            return None
+            
+        # Optional: Use precomputed probabilities list if calling often
+        children_list = list(self.children.values())
+        weights = [outcome[3] for outcome in self.children.keys()]
+        
+        # Faster sampling with numpy
+        if len(weights) > 10:  # Arbitrary threshold for numpy optimization
+            weights = np.array(weights)
+            weights = weights / weights.sum()  # Normalize
+            idx = np.random.choice(len(children_list), p=weights)
+            return children_list[idx]
+        # Standard sampling for smaller sets
+        elif sum(weights) > 0:
+            return random.choices(children_list, weights=weights, k=1)[0]
+        else:
+            return random.choice(children_list)
 
 
 class MCTS:
@@ -90,12 +125,14 @@ class MCTS:
     Modified MCTS for the 2048 game using afterstate value function.
     Alternates between decision nodes (agent moves) and chance nodes (random tile additions).
     """
-    def __init__(self, env, approximator, iterations=30, exploration=0, value_norm=20000):
+    def __init__(self, env, approximator, iterations=25, exploration=0, value_norm=20000):
         self.root = DecisionNode(env)
         self.approximator = approximator
         self.iterations = iterations
         self.exploration = exploration
         self.value_norm = value_norm  # Normalization constant for the value function
+        # Cache for board evaluations to avoid redundant calls to approximator
+        self._eval_cache = {}
 
     def search(self):
         """
@@ -105,8 +142,17 @@ class MCTS:
         if not self.root.children:
             self._expand_decision_node(self.root)
             
-        for idx in range(self.iterations):
-            print(f"idx = {idx}")
+        # If no legal moves, return None
+        if not self.root.children:
+            return None
+            
+        # When exploration is 0 and iterations is small, we can optimize
+        # if self.exploration == 0 and self.iterations <= 50:
+        #     # Single-level maximization can be faster with few iterations
+        #     return self._greedy_action_selection()
+            
+        # Standard MCTS process
+        for _ in range(self.iterations):
             # Selection: traverse the tree to a leaf node
             leaf, path, cumulative_reward = self._tree_policy(self.root)
             # Evaluation: use the approximator instead of rollout
@@ -114,13 +160,33 @@ class MCTS:
             # Backpropagation: update the nodes along the path with the evaluation
             self._backpropagate(path, value)
             
-        # Select the action leading to the child chance node with the highest visit count
+        # Select the action with highest visit count
+        return self._best_action_by_visits()
+
+    def _greedy_action_selection(self):
+        """Fast greedy selection based only on immediate rewards and afterstate values."""
+        best_action = None
+        best_value = -float('inf')
+        
+        for action, chance_node in self.root.children.items():
+            # Direct value estimate without MCTS tree growth
+            value = chance_node.reward + chance_node.value
+            if value > best_value:
+                best_value = value
+                best_action = action
+                
+        return best_action
+
+    def _best_action_by_visits(self):
+        """Select action with most visits from root."""
         best_action = None
         best_visits = -1
+        
         for action, chance_node in self.root.children.items():
             if chance_node.visits > best_visits:
                 best_visits = chance_node.visits
                 best_action = action
+                
         return best_action
 
     def _tree_policy(self, node):
@@ -132,127 +198,152 @@ class MCTS:
         current = node
         cumulative_reward = 0
         
-        idx = 0
+        # Loop while not at a terminal node
         while not current.is_terminal:
-            idx += 1
-            # print(f"Depth: {idx}, Node type: {'Decision' if isinstance(current, DecisionNode) else 'Chance'}")
-            
-            # If we are at a decision node:
+            # Decision node handling
             if isinstance(current, DecisionNode):
-                # If there are untried actions, expand them
+                # Expand if there are untried actions
                 if current.untried_actions:
                     self._expand_decision_node(current)
-                    # After expansion, we should select and continue
                 
-                # If node has no children after expansion, mark as terminal and stop
+                # Check if expansion failed (no legal moves)
                 if not current.children:
                     current.is_terminal = True
-                    # print("Decision node has no children - marking as terminal")
                     break
-                    
-                # Select a chance node using UCT
+                
+                # Select next node
                 chance_child = current.uct_select_child(self.approximator, self.exploration)
-                if chance_child is None:
-                    # UCT selection failed - should not happen if node has children
-                    # print("UCT selection failed")
+                if not chance_child:
                     break
-                    
-                cumulative_reward += chance_child.reward  # Add reward from this action
+                
+                cumulative_reward += chance_child.reward
                 path.append(chance_child)
                 current = chance_child
                 
-            # If we are at a chance node:
+            # Chance node handling
             elif isinstance(current, ChanceNode):
-                # If there are untried outcomes, expand them
+                # Expand if there are untried outcomes
                 if current.untried_outcomes:
                     self._expand_chance_node(current)
-                    # After expansion, we should sample and continue
                 
-                # If node has no children after expansion, mark as terminal and stop
+                # Check if expansion failed
                 if not current.children:
                     current.is_terminal = True
-                    # print("Chance node has no children - marking as terminal")
                     break
-                    
-                # Sample a decision node child according to the outcome probabilities
+                
+                # Sample next node
                 decision_child = current.sample_outcome()
-                if decision_child is None:
-                    # Sampling failed - should not happen if node has children
-                    # print("Sampling failed")
+                if not decision_child:
                     break
-                    
+                
                 path.append(decision_child)
                 current = decision_child
-            
-        # print(f"Final depth: {idx}, Is terminal: {current.is_terminal}")
+                
+            # Terminal check after a complete iteration
+            if current.is_terminal:
+                break
         
         return current, path, cumulative_reward
 
     def _expand_decision_node(self, node):
         """
         Expand a decision node by creating all possible chance node children.
+        Optimized to reuse the environment.
         """
+        env_snapshot = copy.deepcopy(node.env)  # Create one copy to reuse
+        
         for action in node.untried_actions:
-            new_env = copy.deepcopy(node.env)
+            # Reset to snapshot before each action
+            action_env = copy.deepcopy(env_snapshot)
             # Perform the move WITHOUT spawning a random tile
-            reward = new_env.step(action, spawn_tile=False)[1]  # Get the reward from the action
-            # Create a chance node corresponding to the deterministic outcome
-            chance_child = ChanceNode(new_env, node, action, reward)
+            reward = action_env.step(action, spawn_tile=False)[1]
+            
+            # Create a chance node
+            chance_child = ChanceNode(action_env, node, action, reward)
             node.children[action] = chance_child
-            # Calculate the value of this afterstate using the approximator
-            chance_child.value = self.approximator.value(chance_child.env.board)
-        # Remove all untried actions since we've expanded all of them
+            
+            # Calculate and cache value
+            board_tuple = tuple(map(tuple, action_env.board))
+            if board_tuple in self._eval_cache:
+                chance_child.value = self._eval_cache[board_tuple]
+            else:
+                val = self.approximator.value(action_env.board) 
+                self._eval_cache[board_tuple] = val
+                chance_child.value = val
+                
+        # Clear untried actions
         node.untried_actions = []
 
     def _expand_chance_node(self, node):
         """
         Expand a chance node by creating all possible decision node children.
+        Optimized for performance.
         """
+        env_snapshot = copy.deepcopy(node.env)  # Create one copy to reuse
+        empty_mask = (env_snapshot.board == 0)
+        
+        # Process outcomes in batches for efficiency
         for outcome in node.untried_outcomes:
-            new_env = copy.deepcopy(node.env)
-            x, y, tile, _ = outcome
-            new_env.board[x, y] = tile  # simulate the tile addition
-            decision_child = DecisionNode(new_env, parent=node, action_from_parent=outcome)
+            x, y, tile, prob = outcome
+            
+            # Create a new environment
+            outcome_env = copy.deepcopy(env_snapshot)
+            outcome_env.board[x, y] = tile
+            
+            # Create the decision node
+            decision_child = DecisionNode(outcome_env, parent=node, action_from_parent=outcome)
             node.children[outcome] = decision_child
-        # Remove all untried outcomes since we've expanded all of them
+            
+        # Clear untried outcomes
         node.untried_outcomes = []
 
     def _evaluate_node(self, node, cumulative_reward):
         """
         Evaluate a node using the value function instead of a rollout.
+        Uses caching to avoid redundant calculations.
         """
+        # For terminal nodes or empty nodes, return 0 value
+        if node.is_terminal or not hasattr(node, 'env'):
+            return (cumulative_reward) / self.value_norm
+            
         if isinstance(node, DecisionNode):
-            # For a decision node, we need to expand its afterstates first if not already done
+            # Expand if not already done
             if not node.children and not node.is_terminal:
                 self._expand_decision_node(node)
                 
-            # If terminal or no legal moves, the value is 0
-            if node.is_terminal or not node.children:
-                node_value = 0
+            # Calculate max value from children
+            if node.children:
+                max_value = max(
+                    chance_node.reward + chance_node.value 
+                    for chance_node in node.children.values()
+                )
             else:
-                # Value is the maximum of (reward + afterstate value) across all actions
-                max_value = float('-inf')
-                for action, chance_node in node.children.items():
-                    action_value = chance_node.reward + chance_node.value
-                    max_value = max(max_value, action_value)
-                node_value = max_value
+                max_value = 0  # No valid moves
+                
+            node_value = max_value
                 
         elif isinstance(node, ChanceNode):
-            # For a chance node, we can use its already computed value
+            # Use precalculated value
             node_value = node.value
             
-        # Return the normalized value: (cumulative_reward + node_value) / value_norm
+        # Return normalized value
         return (cumulative_reward + node_value) / self.value_norm
 
     def _backpropagate(self, path, leaf_value):
         """
         Update the statistics of all nodes along the path with their specific rewards and values.
+        Optimized for better numerical stability.
         """
+        value_update = leaf_value  # Base value for updates
+        
         for node in reversed(path):
             node.visits += 1
+            
             if isinstance(node, ChanceNode):
-                # For a ChanceNode, the value is the reward from the parent DecisionNode plus the leaf value
-                node.value += (node.reward + leaf_value) / self.value_norm
-            elif isinstance(node, DecisionNode):
-                # For a DecisionNode, the value is just the leaf value (since the reward is handled by the ChanceNode)
-                node.value += leaf_value / self.value_norm
+                # For chance nodes, include their specific reward
+                node_value = node.reward / self.value_norm + value_update
+                # Use a moving average update to improve stability
+                node.value = node.value + (node_value - node.value) / node.visits
+            else:
+                # For decision nodes, just update with the leaf value
+                node.value = node.value + (value_update - node.value) / node.visits
