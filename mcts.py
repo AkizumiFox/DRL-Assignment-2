@@ -147,9 +147,9 @@ class MCTS:
             return None
             
         # When exploration is 0 and iterations is small, we can optimize
-        # if self.exploration == 0 and self.iterations <= 50:
-        #     # Single-level maximization can be faster with few iterations
-        #     return self._greedy_action_selection()
+        if self.exploration == 0 and self.iterations <= 50:
+            # Single-level maximization can be faster with few iterations
+            return self._greedy_action_selection()
             
         # Standard MCTS process
         for _ in range(self.iterations):
